@@ -8,6 +8,10 @@ const Ship = struct {
     pos: Vector2,
     vel: Vector2,
     rot: f32,
+    death_time: f32 = 0.0,
+    fn isDead(self: @This()) bool {
+        return self.death_time != 0.0;
+    }
 };
 
 const Asteroid = struct {
@@ -23,6 +27,22 @@ const State = struct {
     ship: Ship,
     asteroids: std.ArrayList(Asteroid),
     rand: std.rand.Random,
+    particles: std.ArrayList(Particle),
+};
+
+const Particle = struct {
+    pos: Vector2,
+    vel: Vector2,
+    ttl: f32,
+    values: union(enum) {
+        Line: struct {
+            rot: f32,
+            len: f32,
+        },
+        Dot: struct {
+            radius: f32,
+        },
+    },
 };
 
 const THICKNESS = 2.0;
@@ -65,6 +85,13 @@ const ASTEROID_SIZE = enum(u8) {
             .SMALL => SCALE * 0.8,
         };
     }
+    fn velocityScale(self: @This()) f32 {
+        return switch (self) {
+            .BIG => 0.75,
+            .MEDIUM => 1.0,
+            .SMALL => 1.6,
+        };
+    }
 };
 
 fn drawAsteroid(pos: Vector2, size: ASTEROID_SIZE, seed: u64) void {
@@ -83,65 +110,132 @@ fn drawAsteroid(pos: Vector2, size: ASTEROID_SIZE, seed: u64) void {
     drawLines(pos, size.size(), 0.0, points.slice());
 }
 
-fn update() void {
-    const ROT_SPEED = 1;
-    if (rl.isKeyDown(.a)) {
-        state.ship.rot -= state.delta * math.tau * ROT_SPEED;
-    }
-    if (rl.isKeyDown(.d)) {
-        state.ship.rot += state.delta * math.tau * ROT_SPEED;
-    }
-    //cos and sin are the goat!!
-    //cos gives us the x component and sin gives us y component.
-    const shipAngle = state.ship.rot + (math.pi * 0.5);
-    const shipDir = Vector2.init(math.cos(shipAngle), math.sin(shipAngle));
-    const SHIP_SPEED = 400;
-    if (rl.isKeyDown(.w)) {
-        state.ship.pos = rlm.vector2Add(
-            state.ship.pos,
-            rlm.vector2Scale(shipDir, state.delta * SHIP_SPEED),
-        );
+fn update() !void {
+    if (!state.ship.isDead()) {
+        const ROT_SPEED = 1;
+        if (rl.isKeyDown(.a)) {
+            state.ship.rot -= state.delta * math.tau * ROT_SPEED;
+        }
+        if (rl.isKeyDown(.d)) {
+            state.ship.rot += state.delta * math.tau * ROT_SPEED;
+        }
+        const SHIP_SPEED = 400;
+        //cos and sin are the goat!!
+        //cos gives us the x component and sin gives us y component.
+        const shipAngle = state.ship.rot + (math.pi * 0.5);
+        const shipDir = Vector2.init(math.cos(shipAngle), math.sin(shipAngle));
+        if (rl.isKeyDown(.w)) {
+            state.ship.pos = rlm.vector2Add(
+                state.ship.pos,
+                rlm.vector2Scale(shipDir, state.delta * SHIP_SPEED),
+            );
+        }
     }
     const DRAG = 0.015;
     state.ship.vel = rlm.vector2Scale(state.ship.vel, 1.0 - DRAG);
     state.ship.pos = rlm.vector2Add(state.ship.pos, state.ship.vel);
-    state.ship.pos = Vector2.init(@mod(state.ship.pos.x, SIZE.x), @mod(state.ship.pos.y, SIZE.y));
-    if (rl.isKeyDown(.w)) {
-        drawLines(state.ship.pos, SCALE, state.ship.rot, &.{
-            Vector2.init(-0.3, -0.4),
-            Vector2.init(0.0, -0.8),
-            Vector2.init(0.3, -0.4),
-        });
-    }
+    state.ship.pos = Vector2.init(
+        @mod(state.ship.pos.x, SIZE.x),
+        @mod(state.ship.pos.y, SIZE.y),
+    );
     for (state.asteroids.items) |*asteroid| {
         asteroid.pos = rlm.vector2Add(asteroid.pos, asteroid.vel);
+        asteroid.pos = Vector2.init(
+            @mod(asteroid.pos.x, SIZE.x),
+            @mod(asteroid.pos.y, SIZE.y),
+        );
+        //collision detection
+        if (!state.ship.isDead() and rlm.vector2Distance(asteroid.pos, state.ship.pos) < (asteroid.size.size() / 2)) {
+            state.ship.death_time = state.now;
+            for (0..5) |_| {
+                const angle = math.tau * state.rand.float(f32);
+                try state.particles.append(.{ .pos = rlm.vector2Add(
+                    state.ship.pos,
+                    Vector2.init(state.rand.float(f32) * 3, state.rand.float(f32) * 3),
+                ), .vel = rlm.vector2Scale(Vector2.init(math.cos(angle), math.sin(angle)), state.rand.float(f32) * 3.0), .ttl = 3.0 + state.rand.float(f32), .values = .{
+                    .Line = .{
+                        .rot = math.tau * state.rand.float(f32),
+                        .len = SCALE * (0.6 + (0.4 * state.rand.float(f32))),
+                    },
+                } });
+            }
+        }
+    }
+
+    var i: u32 = 0;
+    while (i < state.particles.items.len) {
+        var particle = &state.particles.items[i];
+        particle.pos = rlm.vector2Add(particle.pos, particle.vel);
+        particle.pos = Vector2.init(
+            @mod(particle.pos.x, SIZE.x),
+            @mod(particle.pos.y, SIZE.y),
+        );
+        if (particle.ttl > state.delta) {
+            particle.ttl -= state.delta;
+            i += 1;
+        } else {
+            _ = state.particles.swapRemove(i);
+        }
+    }
+    if (state.ship.isDead() and ((state.now - state.ship.death_time) > 3.0)) {
+        try resetStage();
     }
 }
 
 fn render() void {
-    drawLines(state.ship.pos, SCALE, state.ship.rot, &.{
-        Vector2.init(-0.4, -0.5),
-        Vector2.init(0.0, 0.5),
-        Vector2.init(0.4, -0.5),
-        Vector2.init(0.3, -0.4),
-        Vector2.init(-0.3, -0.4),
-    });
+    if (!state.ship.isDead()) {
+        drawLines(state.ship.pos, SCALE, state.ship.rot, &.{
+            Vector2.init(-0.4, -0.5),
+            Vector2.init(0.0, 0.5),
+            Vector2.init(0.4, -0.5),
+            Vector2.init(0.3, -0.4),
+            Vector2.init(-0.3, -0.4),
+        });
+        if (rl.isKeyDown(.w) and @mod(@as(i32, @intFromFloat(state.now * 20)), 2) == 0) {
+            drawLines(state.ship.pos, SCALE, state.ship.rot, &.{
+                Vector2.init(-0.3, -0.4),
+                Vector2.init(0.0, -0.8),
+                Vector2.init(0.3, -0.4),
+            });
+        }
+    }
     for (state.asteroids.items) |asteroid| {
         drawAsteroid(asteroid.pos, asteroid.size, asteroid.seed);
     }
+    for (state.particles.items) |particle| {
+        switch (particle.values) {
+            .Line => |line| {
+                drawLines(particle.pos, line.len, line.rot, &.{
+                    Vector2.init(-0.5, 0.0),
+                    Vector2.init(0.5, 0.0),
+                });
+            },
+            .Dot => |dot| {
+                rl.drawCircleV(particle.pos, dot.radius, rl.Color.white);
+            },
+        }
+    }
 }
 
-fn initLevel() !void {
-    for (0..10) |_| {
+fn resetStage() !void {
+    state.ship.death_time = 0.0;
+    state.ship = .{
+        .pos = rlm.vector2Scale(SIZE, 0.5),
+        .vel = Vector2.init(0, 0),
+        .rot = 0.0,
+    };
+    try state.asteroids.resize(0);
+    for (0..20) |_| {
         const angle = math.tau * state.rand.float(f32);
+        const size = state.rand.enumValue(ASTEROID_SIZE);
         try state.asteroids.append(
             .{
                 .pos = Vector2.init(
                     state.rand.float(f32) * SIZE.x,
                     state.rand.float(f32) * SIZE.y,
                 ),
-                .vel = rlm.vector2Scale(Vector2.init(math.cos(angle), math.sin(angle)), 3.0 * state.rand.float(f32)),
-                .size = state.rand.enumValue(ASTEROID_SIZE),
+                .vel = rlm.vector2Scale(Vector2.init(math.cos(angle), math.sin(angle)), size.velocityScale() * 3.0 * state.rand.float(f32)),
+                .size = size,
                 .seed = state.rand.int(u64),
             },
         );
@@ -167,14 +261,16 @@ pub fn main() !void {
         },
         .asteroids = std.ArrayList(Asteroid).init(allocator),
         .rand = rand_impl.random(),
+        .particles = std.ArrayList(Particle).init(allocator),
     };
     defer state.asteroids.deinit();
-    try initLevel();
+    defer state.particles.deinit();
+    try resetStage();
     //game loop
     while (!rl.windowShouldClose()) {
         state.delta = rl.getFrameTime();
         state.now += state.delta;
-        update();
+        try update();
         rl.beginDrawing();
         defer rl.endDrawing();
         render();
