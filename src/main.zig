@@ -19,6 +19,7 @@ const Asteroid = struct {
     vel: Vector2,
     size: ASTEROID_SIZE,
     seed: u64,
+    remove: bool = false,
 };
 
 const State = struct {
@@ -26,8 +27,17 @@ const State = struct {
     now: f32 = 0.0,
     ship: Ship,
     asteroids: std.ArrayList(Asteroid),
-    rand: std.rand.Random,
+    asteroids_queue: std.ArrayList(Asteroid),
     particles: std.ArrayList(Particle),
+    projectiles: std.ArrayList(Projectile),
+    rand: std.rand.Random,
+};
+
+const Projectile = struct {
+    pos: Vector2,
+    vel: Vector2,
+    ttl: f32,
+    remove: bool = false,
 };
 
 const Particle = struct {
@@ -119,7 +129,7 @@ fn update() !void {
         if (rl.isKeyDown(.d)) {
             state.ship.rot += state.delta * math.tau * ROT_SPEED;
         }
-        const SHIP_SPEED = 400;
+        const SHIP_SPEED = 300;
         //cos and sin are the goat!!
         //cos gives us the x component and sin gives us y component.
         const shipAngle = state.ship.rot + (math.pi * 0.5);
@@ -130,6 +140,16 @@ fn update() !void {
                 rlm.vector2Scale(shipDir, state.delta * SHIP_SPEED),
             );
         }
+        if (rl.isKeyPressed(.space) or rl.isMouseButtonPressed(rl.MouseButton.left)) {
+            try state.projectiles.append(
+                .{
+                    .pos = rlm.vector2Add(state.ship.pos, rlm.vector2Scale(shipDir, SCALE * 0.55)),
+                    .vel = rlm.vector2Scale(shipDir, 10),
+                    .ttl = 1.5,
+                },
+            );
+            state.ship.vel = rlm.vector2Add(state.ship.vel, rlm.vector2Scale(shipDir, -0.45));
+        }
     }
     const DRAG = 0.015;
     state.ship.vel = rlm.vector2Scale(state.ship.vel, 1.0 - DRAG);
@@ -138,47 +158,118 @@ fn update() !void {
         @mod(state.ship.pos.x, SIZE.x),
         @mod(state.ship.pos.y, SIZE.y),
     );
-    for (state.asteroids.items) |*asteroid| {
-        asteroid.pos = rlm.vector2Add(asteroid.pos, asteroid.vel);
-        asteroid.pos = Vector2.init(
-            @mod(asteroid.pos.x, SIZE.x),
-            @mod(asteroid.pos.y, SIZE.y),
-        );
-        //collision detection
-        if (!state.ship.isDead() and rlm.vector2Distance(asteroid.pos, state.ship.pos) < (asteroid.size.size() / 2)) {
-            state.ship.death_time = state.now;
-            for (0..5) |_| {
-                const angle = math.tau * state.rand.float(f32);
-                try state.particles.append(.{ .pos = rlm.vector2Add(
-                    state.ship.pos,
-                    Vector2.init(state.rand.float(f32) * 3, state.rand.float(f32) * 3),
-                ), .vel = rlm.vector2Scale(Vector2.init(math.cos(angle), math.sin(angle)), state.rand.float(f32) * 3.0), .ttl = 3.0 + state.rand.float(f32), .values = .{
-                    .Line = .{
-                        .rot = math.tau * state.rand.float(f32),
-                        .len = SCALE * (0.6 + (0.4 * state.rand.float(f32))),
-                    },
-                } });
+    try state.asteroids.appendSlice(state.asteroids_queue.items);
+    try state.asteroids_queue.resize(0);
+    {
+        var i: usize = 0;
+        while (i < state.asteroids.items.len) {
+            var asteroid = &state.asteroids.items[i];
+            asteroid.pos = rlm.vector2Add(asteroid.pos, asteroid.vel);
+            asteroid.pos = Vector2.init(
+                @mod(asteroid.pos.x, SIZE.x),
+                @mod(asteroid.pos.y, SIZE.y),
+            );
+            //collision detection
+            if (!state.ship.isDead() and rlm.vector2Distance(asteroid.pos, state.ship.pos) < (asteroid.size.size() / 2)) {
+                state.ship.death_time = state.now;
+                for (0..5) |_| {
+                    const angle = math.tau * state.rand.float(f32);
+                    try state.particles.append(.{ .pos = rlm.vector2Add(
+                        state.ship.pos,
+                        Vector2.init(state.rand.float(f32) * 3, state.rand.float(f32) * 3),
+                    ), .vel = rlm.vector2Scale(Vector2.init(math.cos(angle), math.sin(angle)), state.rand.float(f32) * 3.0), .ttl = 3.0 + state.rand.float(f32), .values = .{
+                        .Line = .{
+                            .rot = math.tau * state.rand.float(f32),
+                            .len = SCALE * (0.6 + (0.4 * state.rand.float(f32))),
+                        },
+                    } });
+                    try splat(15, state.ship.pos);
+                }
+            }
+            //collisiom between asteroids and projectiles
+            for (state.projectiles.items) |*p| {
+                if (rlm.vector2Distance(p.pos, asteroid.pos) < asteroid.size.size()) {
+                    p.remove = true;
+                    try hitAsteroid(asteroid, rlm.vector2Normalize(p.vel));
+                }
+            }
+            if (asteroid.remove) {
+                _ = state.asteroids.swapRemove(i);
+            } else {
+                i += 1;
             }
         }
     }
-
-    var i: u32 = 0;
-    while (i < state.particles.items.len) {
-        var particle = &state.particles.items[i];
-        particle.pos = rlm.vector2Add(particle.pos, particle.vel);
-        particle.pos = Vector2.init(
-            @mod(particle.pos.x, SIZE.x),
-            @mod(particle.pos.y, SIZE.y),
-        );
-        if (particle.ttl > state.delta) {
-            particle.ttl -= state.delta;
-            i += 1;
-        } else {
-            _ = state.particles.swapRemove(i);
+    {
+        var i: usize = 0;
+        while (i < state.projectiles.items.len) {
+            var projectile = &state.projectiles.items[i];
+            projectile.pos = rlm.vector2Add(projectile.pos, projectile.vel);
+            projectile.pos = Vector2.init(
+                @mod(projectile.pos.x, SIZE.x),
+                @mod(projectile.pos.y, SIZE.y),
+            );
+            if (!projectile.remove and projectile.ttl > state.delta) {
+                projectile.ttl -= state.delta;
+                i += 1;
+            } else {
+                _ = state.projectiles.swapRemove(i);
+            }
+        }
+    }
+    {
+        var i: usize = 0;
+        while (i < state.particles.items.len) {
+            var particle = &state.particles.items[i];
+            particle.pos = rlm.vector2Add(particle.pos, particle.vel);
+            particle.pos = Vector2.init(
+                @mod(particle.pos.x, SIZE.x),
+                @mod(particle.pos.y, SIZE.y),
+            );
+            if (particle.ttl > state.delta) {
+                particle.ttl -= state.delta;
+                i += 1;
+            } else {
+                _ = state.particles.swapRemove(i);
+            }
         }
     }
     if (state.ship.isDead() and ((state.now - state.ship.death_time) > 3.0)) {
         try resetStage();
+    }
+}
+
+fn splat(count: usize, pos: Vector2) !void {
+    for (0..count) |_| {
+        const angle = math.tau * state.rand.float(f32);
+        try state.particles.append(.{ .pos = pos, .vel = rlm.vector2Scale(Vector2.init(math.cos(angle), math.sin(angle)), state.rand.float(f32) * 3.0), .ttl = 2.0 + 0.5 * state.rand.float(f32), .values = .{ .Dot = .{ .radius = 1.0 } } });
+    }
+}
+
+fn hitAsteroid(a: *Asteroid, impact: ?Vector2) !void {
+    a.remove = true;
+    if (a.size == .SMALL) {
+        return;
+    }
+    for (0..2) |_| {
+        const size: ASTEROID_SIZE = switch (a.size) {
+            .BIG => .MEDIUM,
+            .MEDIUM => .SMALL,
+            else => unreachable,
+        };
+        try splat(10, a.pos);
+        const dir = rlm.vector2Normalize(a.vel);
+        try state.asteroids_queue.append(
+            .{
+                .pos = a.pos,
+                .vel = rlm.vector2Add(
+                    rlm.vector2Scale(dir, a.size.velocityScale() * 1.5 * state.rand.float(f32)),
+                    if (impact) |i| rlm.vector2Scale(i, 1.5) else Vector2.init(0, 0),
+                ),
+                .size = size,
+                .seed = state.rand.int(u64),
+            },
+        );
     }
 }
 
@@ -202,6 +293,10 @@ fn render() void {
     for (state.asteroids.items) |asteroid| {
         drawAsteroid(asteroid.pos, asteroid.size, asteroid.seed);
     }
+
+    for (state.projectiles.items) |projectile| {
+        rl.drawCircleV(projectile.pos, SCALE * 0.05, rl.Color.white);
+    }
     for (state.particles.items) |particle| {
         switch (particle.values) {
             .Line => |line| {
@@ -217,13 +312,7 @@ fn render() void {
     }
 }
 
-fn resetStage() !void {
-    state.ship.death_time = 0.0;
-    state.ship = .{
-        .pos = rlm.vector2Scale(SIZE, 0.5),
-        .vel = Vector2.init(0, 0),
-        .rot = 0.0,
-    };
+fn resetAsteroids() !void {
     try state.asteroids.resize(0);
     for (0..20) |_| {
         const angle = math.tau * state.rand.float(f32);
@@ -242,6 +331,15 @@ fn resetStage() !void {
     }
 }
 
+fn resetStage() !void {
+    state.ship.death_time = 0.0;
+    state.ship = .{
+        .pos = rlm.vector2Scale(SIZE, 0.5),
+        .vel = Vector2.init(0, 0),
+        .rot = 0.0,
+    };
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
@@ -255,17 +353,22 @@ pub fn main() !void {
     rl.setTargetFPS(60);
     state = .{
         .ship = .{
-            .pos = rlm.vector2Scale(SIZE, 0.5),
+            .pos = rlm.vector2Scale(SIZE, 0.5), //center of the screen.
             .vel = Vector2.init(0, 0),
             .rot = 0.0,
         },
         .asteroids = std.ArrayList(Asteroid).init(allocator),
+        .asteroids_queue = std.ArrayList(Asteroid).init(allocator),
         .rand = rand_impl.random(),
         .particles = std.ArrayList(Particle).init(allocator),
+        .projectiles = std.ArrayList(Projectile).init(allocator),
     };
     defer state.asteroids.deinit();
+    defer state.asteroids_queue.deinit();
     defer state.particles.deinit();
+    defer state.projectiles.deinit();
     try resetStage();
+    try resetAsteroids();
     //game loop
     while (!rl.windowShouldClose()) {
         state.delta = rl.getFrameTime();
